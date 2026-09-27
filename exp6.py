@@ -1,185 +1,120 @@
-!pip install -q crewai
+!pip install -q transformers==4.46.3 peft==0.13.2 datasets accelerate
 
-import os
-from getpass import getpass
-from crewai import Agent, Task, Crew, LLM
+from datasets import load_dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    TrainingArguments,
+    Trainer
+)
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    TaskType
+)
 
-# Exp 5: Multi-agent travel planner
-class TravelPlanner:
+# Exp 6: PEFT with LoRA
+class LoRAClassifier:
     def __init__(self):
-        os.environ["GEMINI_API_KEY"] = getpass(
-            "Enter Gemini API Key: "
+        data = load_dataset("fancyzhx/ag_news")
+
+        # Old:
+        # self.train = data["train"].select(range(100))
+        # self.test = data["test"].select(range(20))
+
+        self.train = data["train"].select(range(1000))
+        self.test = data["test"].select(range(100))
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "distilbert-base-uncased"
         )
 
-        self.llm = LLM(
-            model="gemini/gemini-3.6-flash",
-            api_key=os.environ["GEMINI_API_KEY"]
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            "distilbert-base-uncased",
+            num_labels=4
         )
 
-    def create_agent(self, role, goal, backstory):
-        return Agent(
-            role=role,
-            goal=goal,
-            backstory=backstory,
-            llm=self.llm
+        config = LoraConfig(
+            r=4,
+            lora_alpha=8,
+            lora_dropout=0.1,
+            target_modules=["q_lin", "v_lin"],
+            task_type=TaskType.SEQ_CLS
         )
 
-    def validate(self, days, people, budget):
-        if days <= 0:
-            raise ValueError("Number of days must be greater than 0.")
+        self.model = get_peft_model(
+            self.model,
+            config
+        )
 
-        if people <= 0:
-            raise ValueError("Number of travelers must be greater than 0.")
-
-        if budget <= 0:
-            raise ValueError("Budget must be greater than 0.")
+    def tokenize(self, x):
+        return self.tokenizer(
+            x["text"],
+            padding="max_length",
+            truncation=True,
+            max_length=64
+        )
 
     def run(self):
-        # Original input code retained
-        source = input("Starting city: ")
-        destination = input("Destination: ")
-        days = input("Number of days: ")
-        people = input("Number of travelers: ")
-        budget = input("Budget (₹): ")
-        interest = input("Interests: ")
+        self.train = self.train.map(
+            self.tokenize,
+            batched=True
+        )
+
+        self.test = self.test.map(
+            self.tokenize,
+            batched=True
+        )
+
+        print("\nLoRA Parameters:")
+        self.model.print_trainable_parameters()
 
         # Old:
-        # info = f"""
-        # From: {source}
-        # To: {destination}
-        # Days: {days}
-        # Travelers: {people}
-        # Budget: {budget} ₹
-        # Interests: {interest}
-        # """
-
-        days = int(days)
-        people = int(people)
-        budget = float(budget)
-
-        self.validate(days, people, budget)
-
-        info = f"""
-From: {source}
-To: {destination}
-Days: {days}
-Travelers: {people}
-Budget: ₹{budget}
-Interests: {interest}
-"""
-
-        transport = self.create_agent(
-            "Transport Expert",
-            "Suggest affordable transportation",
-            "You are a travel transport expert."
-        )
-
-        hotel = self.create_agent(
-            "Hotel Expert",
-            "Suggest affordable accommodation",
-            "You are a hotel expert."
-        )
-
-        activities = self.create_agent(
-            "Activity Expert",
-            "Suggest activities",
-            "You are a local travel guide."
-        )
-
-        planner = self.create_agent(
-            "Travel Planner",
-            "Create a complete budget-friendly itinerary",
-            "You are an experienced travel planner."
-        )
-
-        t1 = Task(
-            description=f"""
-Suggest affordable transport for:
-{info}
-
-Check that the transportation is suitable for the number
-of travelers and trip duration.
-""",
-            agent=transport,
-            expected_output="Transport recommendation and cost."
-        )
-
-        t2 = Task(
-            description=f"""
-Suggest affordable hotels for:
-{info}
-
-Check room requirements for the number of travelers.
-""",
-            agent=hotel,
-            expected_output="Hotel recommendation and cost."
-        )
-
-        t3 = Task(
-            description=f"""
-Suggest realistic activities for:
-{info}
-
-Activities must match the destination and interests.
-""",
-            agent=activities,
-            expected_output="Activities and estimated costs."
-        )
-
-        # Old:
-        # t4 = Task(
-        #     description=f"""
-        #     Create a day-wise itinerary using the recommendations
-        #     from the other agents.
-        #     Requirements:
-        #     {info}
-        #     Keep the total cost within the budget.
-        #     """,
-        #     agent=planner,
-        #     expected_output="Complete travel itinerary."
+        # args = TrainingArguments(
+        #     output_dir="result",
+        #     num_train_epochs=1,
+        #     per_device_train_batch_size=16,
+        #     learning_rate=2e-4,
+        #     save_strategy="no",
+        #     report_to="none"
         # )
 
-        t4 = Task(
-            description=f"""
-Create a day-wise itinerary using the recommendations
-from the other agents.
-
-Requirements:
-{info}
-
-Validate:
-1. Total estimated cost must stay within the budget.
-2. Activities must match the destination.
-3. Activities must match the user's interests.
-4. Schedule must fit within the number of days.
-5. Transport must match the route.
-6. Avoid duplicate activities.
-
-If information is uncertain, clearly mention it.
-""",
-            agent=planner,
-            expected_output="Validated complete travel itinerary."
+        args = TrainingArguments(
+            output_dir="result",
+            num_train_epochs=3,
+            per_device_train_batch_size=16,
+            learning_rate=2e-4,
+            save_strategy="no",
+            report_to="none"
         )
 
-        crew = Crew(
-            agents=[
-                transport,
-                hotel,
-                activities,
-                planner
-            ],
-            tasks=[
-                t1,
-                t2,
-                t3,
-                t4
-            ]
+        trainer = Trainer(
+            model=self.model,
+            args=args,
+            train_dataset=self.train,
+            processing_class=self.tokenizer
         )
 
-        result = crew.kickoff()
+        trainer.train()
 
-        print("\n===== FINAL TRAVEL ITINERARY =====")
-        print(result)
+        result = trainer.predict(self.test)
+        predicted = result.predictions.argmax(axis=1)
+
+        classes = {
+            0: "World",
+            1: "Sports",
+            2: "Business",
+            3: "Technology"
+        }
+
+        print("\n========== PREDICTIONS ==========")
+
+        for i in range(5):
+            print("\nText:", self.test[i]["text"])
+            print("Actual:", classes[self.test[i]["label"]])
+            print("Predicted:", classes[predicted[i]])
+
+        print("\nPEFT + LoRA Experiment Completed")
 
 
-TravelPlanner().run()
+LoRAClassifier().run()
